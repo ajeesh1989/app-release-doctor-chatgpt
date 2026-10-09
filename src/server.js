@@ -256,7 +256,7 @@ function createMcpServer() {
         "App Release Doctor",
 
       description:
-        "Open App Release Doctor to inspect Flutter Android releases and check Google Play readiness.",
+        "Open App Release Doctor to inspect Flutter Android releases and check Google Play readiness. To inspect an attached Android App Bundle, provide its file metadata; it will be uploaded before inspection.",
 
       inputSchema:
         z.object({
@@ -289,6 +289,23 @@ function createMcpServer() {
           aabPath: z
             .string()
             .optional(),
+
+          file: z
+            .object({
+              download_url: z
+                .string()
+                .url(),
+              file_id: z
+                .string()
+                .min(1),
+              mime_type: z
+                .string()
+                .optional(),
+              file_name: z
+                .string()
+                .optional(),
+            })
+            .optional(),
         }),
       
       _meta: {
@@ -311,13 +328,18 @@ function createMcpServer() {
       projectPath,
       uploadId,
       aabPath,
+      file,
     }) => {
+      const diagnosticAction =
+        action ??
+        (file ? "inspect_aab" : undefined);
+
       /*
        * If ChatGPT opens the App without
        * selecting a diagnostic, simply return
        * the ready message.
        */
-      if (!action) {
+      if (!diagnosticAction) {
         return {
           content: [
             {
@@ -331,7 +353,7 @@ function createMcpServer() {
 
       try {
         console.log(
-          `Calling production tool: ${action}`,
+          `Calling production tool: ${diagnosticAction}`,
         );
 
         /*
@@ -344,7 +366,7 @@ function createMcpServer() {
          * Target SDK check requires targetSdk.
          */
         if (
-          action ===
+          diagnosticAction ===
           "check_target_sdk"
         ) {
           remoteArgs = {
@@ -358,9 +380,9 @@ function createMcpServer() {
          * remotely uploaded workspace.
          */
         if (
-          action ===
+          diagnosticAction ===
             "check_flutter_project" ||
-          action ===
+          diagnosticAction ===
             "check_play_store_readiness"
         ) {
           if (projectPath) {
@@ -379,17 +401,72 @@ function createMcpServer() {
          * AAB path or a remotely uploaded AAB.
          */
         if (
-          action ===
+          diagnosticAction ===
           "inspect_aab"
         ) {
-          if (aabPath) {
-            remoteArgs.aabPath =
-              aabPath;
-          }
+          if (file) {
+            const uploadResult =
+              await callRemoteTool(
+                "upload_aab",
+                { file },
+              );
 
-          if (uploadId) {
+            if (uploadResult.isError) {
+              const details =
+                uploadResult.content
+                  ?.filter(
+                    (item) =>
+                      item.type === "text",
+                  )
+                  .map((item) => item.text)
+                  .join("\n");
+
+              throw new Error(
+                `Production upload_aab failed: ${
+                  details || "No error details returned."
+                }`,
+              );
+            }
+
+            const structuredUploadId =
+              uploadResult.structuredContent
+                ?.uploadId;
+            const textUploadId =
+              uploadResult.content
+                ?.filter(
+                  (item) =>
+                    item.type === "text",
+                )
+                .map((item) =>
+                  item.text.match(
+                    /"uploadId"\s*:\s*"([^"]+)"|uploadId\s*[:=]\s*([^\s,}]+)/i,
+                  ),
+                )
+                .find(Boolean);
+            const uploadedId =
+              typeof structuredUploadId === "string"
+                ? structuredUploadId
+                : textUploadId?.[1] ??
+                  textUploadId?.[2];
+
+            if (!uploadedId) {
+              throw new Error(
+                "Production upload_aab response did not include an uploadId.",
+              );
+            }
+
             remoteArgs.uploadId =
-              uploadId;
+              uploadedId;
+          } else {
+            if (aabPath) {
+              remoteArgs.aabPath =
+                aabPath;
+            }
+
+            if (uploadId) {
+              remoteArgs.uploadId =
+                uploadId;
+            }
           }
         }
 
@@ -400,14 +477,14 @@ function createMcpServer() {
 
         const remoteResult =
           await callRemoteTool(
-            action,
+            diagnosticAction,
             remoteArgs,
           );
 
         return remoteResult;
       } catch (error) {
         console.error(
-          `Remote tool "${action}" failed:`,
+          `Remote tool "${diagnosticAction}" failed:`,
           error,
         );
 
@@ -416,7 +493,7 @@ function createMcpServer() {
             {
               type: "text",
               text:
-                `Unable to run ${action.replaceAll(
+                `Unable to run ${diagnosticAction.replaceAll(
                   "_",
                   " ",
                 )} on the production App Release Doctor MCP.\n\n` +
