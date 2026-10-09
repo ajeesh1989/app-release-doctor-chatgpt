@@ -315,6 +315,10 @@ function createMcpServer() {
         "openai/outputTemplate":
           UI_URI,
 
+        "openai/fileParams": [
+          "file",
+        ],
+
         "openai/toolInvocation/invoking":
           "Opening App Release Doctor...",
 
